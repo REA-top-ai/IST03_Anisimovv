@@ -1,89 +1,92 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
-#include <cstdint>
 #include <cmath>
 #include <algorithm>
 
-#pragma pack(push, 1)
-struct BMPFileHeader {
-    uint16_t signature; uint32_t file_size; uint16_t res1, res2; uint32_t data_offset;
-};
-struct BMPInfoHeader {
-    uint32_t header_size; int32_t width, height; uint16_t planes, bits_per_pixel;
-    uint32_t compression, image_size; int32_t x_pixels_per_m, y_pixels_per_m;
-    uint32_t colors_used, colors_important;
-};
-#pragma pack(pop)
+using namespace std;
 
-struct Pixel { uint8_t r, g, b; double y; };
+// Одна точка на экране
+struct Pixel { 
+    int r, g, b; 
+    double y; 
+};
 
 class Bitmap {
+public:
     int width, height;
-    std::vector<Pixel> pixels;
+    vector<Pixel> pixels;
 
-    // Универсальная функция для расчета Mean и Median по гистограмме
-    void calcStats(const int* hist, int total, double& mean, int& median) {
-        long long sum = 0; int count = 0; median = 0;
-        for (int i = 0; i < 256; ++i) sum += i * hist[i];
-        mean = (double)sum / total;
-        for (int i = 0; i < 256; ++i) {
-            count += hist[i];
-            if (count >= total / 2) { median = i; break; }
-        }
+    // --- ФУНКЦИИ ДЛЯ АРИФМЕТИЧЕСКОГО ПЕРЕВОДА БАЙТОВ В ИНТЫ ---
+
+    // Читает 2 байта и собирает из них число (для short)
+    int read2Bytes(ifstream& f) {
+        unsigned char bytes[2];
+        f.read((char*)bytes, 2); // Читаем 2 сырых байта
+        // Арифметика: младший байт + старший байт * 256
+        return bytes[0] + (bytes[1] * 256); 
     }
 
-public:
+    // Читает 4 байта и собирает из них число (для int)
+    int read4Bytes(ifstream& f) {
+        unsigned char bytes[4];
+        f.read((char*)bytes, 4); // Читаем 4 сырых байта
+        // Арифметика: собираем число, умножая на степени 256
+        return bytes[0] + 
+               (bytes[1] * 256) + 
+               (bytes[2] * 256 * 256) + 
+               (bytes[3] * 256 * 256 * 256);
+    }
+
+    // -----------------------------------------------------------
+
     bool load(const char* path) {
-        std::ifstream f(path, std::ios::binary);
+        ifstream f(path, ios::binary);
         if (!f) return false;
 
-        BMPFileHeader fh; BMPInfoHeader ih;
-        f.read((char*)&fh, sizeof(fh)); f.read((char*)&ih, sizeof(ih));
-        if (fh.signature != 0x4D42) return false;
+        // ЧИТАЕМ ЗАГОЛОВОК ВРУЧНУЮ ЧЕРЕЗ АРИФМЕТИКУ
+        int signature = read2Bytes(f); // Читаем 2 байта (BM)
+        if (signature != 0x4D42) return false; // Проверка на буквы BM
 
-        // Вывод заголовка (сокращенный)
-        std::cout << "--- Headers ---\nSignature: BM\nFile size: " << fh.file_size
-                  << "\nData offset: " << fh.data_offset << "\nInfo header size: " << ih.header_size
-                  << "\nWidth: " << ih.width << "\nHeight: " << ih.height
-                  << "\nPlanes: " << ih.planes << "\nBits per pixel: " << ih.bits_per_pixel
-                  << "\nCompression: " << ih.compression << "\nImage size: " << ih.image_size
-                  << "\nXpixelsPerM: " << ih.x_pixels_per_m << "\nYpixelsPerM: " << ih.y_pixels_per_m
-                  << "\nColors Used: " << ih.colors_used << "\nColors Important: " << ih.colors_important << "\n\n";
+        int file_size = read4Bytes(f);       // Читаем 4 байта
+        read2Bytes(f);                       // Пропускаем 2 байта (reserved)
+        read2Bytes(f);                       // Пропускаем 2 байта (reserved)
+        int data_offset = read4Bytes(f);     // Смещение до пикселей
 
-        width = ih.width; height = std::abs(ih.height);
-        int bpp = ih.bits_per_pixel;
+        int header_size = read4Bytes(f);     // Размер инфо-заголовка
+        width = read4Bytes(f);               // Ширина
+        height = read4Bytes(f);              // Высота
+        int planes = read2Bytes(f);          // Плоскости
+        int bits_per_pixel = read2Bytes(f);  // Битность
 
-        // Чтение палитры (если нужно)
-        std::vector<Pixel> palette;
-        if (bpp <= 8) {
-            int n = ih.colors_used == 0 ? (1 << bpp) : ih.colors_used;
-            palette.resize(n);
-            for (int i = 0; i < n; ++i) {
-                uint8_t b, g, r, res;
-                f.read((char*)&b, 1); f.read((char*)&g, 1); f.read((char*)&r, 1); f.read((char*)&res, 1);
-                palette[i] = {r, g, b, 0.0};
-            }
+        // Пропускаем остальные заголовки, чтобы не читать их по одному
+        // (там compression, image_size и т.д., они нам не нужны для логики)
+        
+        if (bits_per_pixel != 24) {
+            cout << "Ошибка: код работает только с 24-битными BMP!" << endl;
+            return false;
         }
 
-        f.seekg(fh.data_offset);
-        int rowSize = ((width * bpp + 31) / 32) * 4;
-        std::vector<uint8_t> row(rowSize);
+        // Прыгаем к пикселям
+        f.seekg(data_offset);
+
+        int rowSize = (width * 3 + 3) & ~3;
+        vector<unsigned char> row(rowSize);
         pixels.resize(width * height);
 
-        // Чтение пикселей
-        for (int y = 0; y < height; ++y) {
+        // Читаем пиксели
+        for (int y = 0; y < height; y++) {
             f.read((char*)row.data(), rowSize);
-            int realY = ih.height > 0 ? height - 1 - y : y;
-            for (int x = 0; x < width; ++x) {
-                Pixel p = {0, 0, 0, 0.0};
-                if (bpp == 24 || bpp == 32) {
-                    int offset = x * (bpp / 8);
-                    p = {row[offset + 2], row[offset + 1], row[offset], 0.0}; // BGR
-                } else if (bpp == 8) p = palette[row[x]];
-                else if (bpp == 4) p = palette[(x % 2 == 0) ? (row[x / 2] >> 4) : (row[x / 2] & 0x0F)];
-
-                p.y = 0.2126 * p.r + 0.7152 * p.g + 0.0722 * p.b; // Luminance
+            int realY = height - 1 - y; 
+            
+            for (int x = 0; x < width; x++) {
+                Pixel p;
+                // ТУТ ТОЖЕ ЯВНЫЙ ПЕРЕВОД БАЙТОВ В ИНТЫ
+                p.b = (int)row[x * 3];     // Явно приводим тип к int
+                p.g = (int)row[x * 3 + 1];
+                p.r = (int)row[x * 3 + 2];
+                
+                p.y = 0.2126 * p.r + 0.7152 * p.g + 0.0722 * p.b;
                 pixels[realY * width + x] = p;
             }
         }
@@ -91,57 +94,74 @@ public:
     }
 
     void printCorners() {
-        std::cout << "--- Corners (R: G: B) ---\n";
-        int xs[] = {0, width - 1, 0, width - 1}, ys[] = {0, 0, height - 1, height - 1};
-        const char* names[] = {"Top-Left", "Top-Right", "Bottom-Left", "Bottom-Right"};
-        for (int i = 0; i < 4; ++i) {
-            Pixel p = pixels[ys[i] * width + xs[i]];
-            std::cout << names[i] << ": R:" << (int)p.r << " G:" << (int)p.g << " B:" << (int)p.b << "\n";
-        }
-        std::cout << "\n";
+        cout << "--- Corners (R: G: B) ---" << endl;
+        cout << "Top-Left: R:" << pixels[0].r << " G:" << pixels[0].g << " B:" << pixels[0].b << endl;
+        cout << "Top-Right: R:" << pixels[width - 1].r << " G:" << pixels[width - 1].g << " B:" << pixels[width - 1].b << endl;
+        cout << "Bottom-Left: R:" << pixels[(height - 1) * width].r << " G:" << pixels[(height - 1) * width].g << " B:" << pixels[(height - 1) * width].b << endl;
+        cout << "Bottom-Right: R:" << pixels[height * width - 1].r << " G:" << pixels[height * width - 1].g << " B:" << pixels[height * width - 1].b << endl;
     }
 
     void evaluateExposure() {
         int hist[256] = {0};
-        for (auto& p : pixels) hist[std::clamp((int)std::round(p.y), 0, 255)]++;
-        double mean; int median;
-        calcStats(hist, width * height, mean, median);
-        std::cout << "--- Exposure (Y) ---\nMean: " << mean << "\nMedian: " << median << "\n\n";
+        long long sum = 0;
+
+        for (int i = 0; i < pixels.size(); i++) {
+            int val = round(pixels[i].y);
+            if (val > 255) val = 255;
+            if (val < 0) val = 0;
+            hist[val]++;
+            sum += val;
+        }
+
+        double mean = (double)sum / pixels.size();
+        int median = 0, count = 0;
+        for (int i = 0; i < 256; i++) {
+            count += hist[i];
+            if (count >= pixels.size() / 2) { median = i; break; }
+        }
+
+        cout << "--- Exposure (Y) ---" << endl;
+        cout << "Mean: " << mean << endl;
+        cout << "Median: " << median << endl;
     }
 
     void evaluateWhiteBalance() {
-        long long rS = 0, gS = 0, bS = 0;
-        int total = width * height;
-        for (auto& p : pixels) { rS += p.r; gS += p.g; bS += p.b; }
+        long long sumR = 0, sumG = 0, sumB = 0;
+        int total = pixels.size();
 
-        double rAvg = (double)rS / total, gAvg = (double)gS / total, bAvg = (double)bS / total;
-        double target = std::max({rAvg, gAvg, bAvg});
-        double kr = target / rAvg, kg = target / gAvg, kb = target / bAvg;
-
-        std::cout << "--- White Balance ---\nGains: Kr=" << kr << " Kg=" << kg << " Kb=" << kb << "\n";
-
-        int hR[256] = {0}, hG[256] = {0}, hB[256] = {0};
-        for (auto& p : pixels) {
-            p.r = std::clamp((int)(p.r * kr), 0, 255);
-            p.g = std::clamp((int)(p.g * kg), 0, 255);
-            p.b = std::clamp((int)(p.b * kb), 0, 255);
-            hR[p.r]++; hG[p.g]++; hB[p.b]++;
+        for (int i = 0; i < total; i++) {
+            sumR += pixels[i].r; sumG += pixels[i].g; sumB += pixels[i].b;
         }
 
-        double mean; int median;
-        calcStats(hR, total, mean, median); std::cout << "R -> Mean: " << mean << ", Median: " << median << "\n";
-        calcStats(hG, total, mean, median); std::cout << "G -> Mean: " << mean << ", Median: " << median << "\n";
-        calcStats(hB, total, mean, median); std::cout << "B -> Mean: " << mean << ", Median: " << median << "\n";
+        double avgR = (double)sumR / total;
+        double avgG = (double)sumG / total;
+        double avgB = (double)sumB / total;
+        double target = max({avgR, avgG, avgB});
+
+        double kr = target / avgR;
+        double kg = target / avgG;
+        double kb = target / avgB;
+
+        cout << "--- White Balance ---" << endl;
+        cout << "Gains: Kr=" << kr << " Kg=" << kg << " Kb=" << kb << endl;
+
+        for (int i = 0; i < total; i++) {
+            pixels[i].r = min(255, (int)(pixels[i].r * kr));
+            pixels[i].g = min(255, (int)(pixels[i].g * kg));
+            pixels[i].b = min(255, (int)(pixels[i].b * kb));
+        }
     }
 };
 
 int main(int argc, char** argv) {
     Bitmap bmp;
-    if (!bmp.load(argc > 1 ? argv[1] : "image.bmp")) return 1;
-    
+    if (!bmp.load(argc > 1 ? argv[1] : "image.bmp")) {
+        cout << "Ошибка загрузки!" << endl;
+        return 1;
+    }
+
     bmp.printCorners();
     bmp.evaluateExposure();
     bmp.evaluateWhiteBalance();
-    
     return 0;
 }
